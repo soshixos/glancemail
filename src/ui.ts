@@ -22,6 +22,7 @@ let statusEl: HTMLDivElement
 let finalEl: HTMLSpanElement
 let interimEl: HTMLSpanElement
 let glassesEl: HTMLPreElement
+let footerEl: HTMLDivElement | null = null
 
 export function mountUi(cb: CompanionCallbacks) {
   const app = document.querySelector<HTMLDivElement>('#app')!
@@ -39,7 +40,6 @@ export function mountUi(cb: CompanionCallbacks) {
         <button data-act="down">Scroll down</button>
         <button data-act="inbox">Inbox</button>
         <button data-act="reply">Reply screen</button>
-        <button data-act="meeting">Meeting brief</button>
         <button data-act="approve">Approve + send</button>
         <button data-act="edit">Edit by voice</button>
         <button data-act="discard">Discard</button>
@@ -51,13 +51,14 @@ export function mountUi(cb: CompanionCallbacks) {
       <section class="transcript" aria-live="polite">
         <span id="final"></span><span id="interim" class="interim"></span>
       </section>
-      <footer>Mock data only — no real Gmail/Calendar calls yet. Tap the glasses temple for the primary action · double-tap to exit.</footer>
+      <footer id="backend-footer">Connecting to local backend…</footer>
     </main>
   `
   statusEl = app.querySelector<HTMLDivElement>('#status')!
   finalEl = app.querySelector<HTMLSpanElement>('#final')!
   interimEl = app.querySelector<HTMLSpanElement>('#interim')!
   glassesEl = app.querySelector<HTMLPreElement>('#glasses')!
+  footerEl = app.querySelector<HTMLDivElement>('#backend-footer')!
   const voiceInput = app.querySelector<HTMLInputElement>('#voice-input')!
 
   app.querySelectorAll<HTMLButtonElement>('[data-act]').forEach(btn => {
@@ -68,7 +69,6 @@ export function mountUi(cb: CompanionCallbacks) {
       else if (act === 'down') cb.onScrollDown()
       else if (act === 'inbox') cb.onGoInbox()
       else if (act === 'reply') cb.onOpenReply()
-      else if (act === 'meeting') cb.onGoMeeting()
       else if (act === 'approve') cb.onApprove()
       else if (act === 'edit') cb.onEdit()
       else if (act === 'discard') cb.onDiscard()
@@ -97,6 +97,19 @@ export function setStatus(kind: Status, text: string) {
   if (!statusEl) return
   statusEl.className = `status status-${kind}`
   statusEl.textContent = text
+}
+
+/** Live backend status shown in the companion footer (honest demo state). */
+export type BackendStatus = 'connecting' | 'live' | 'offline'
+
+export function setBackendStatus(status: BackendStatus) {
+  if (!footerEl) return
+  footerEl.textContent =
+    status === 'live'
+      ? 'Live Gmail via local backend'
+      : status === 'offline'
+        ? 'OFFLINE — mock data'
+        : 'Connecting to local backend…'
 }
 
 export function setTranscript(finalText: string, interimText: string) {

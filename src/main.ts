@@ -1,18 +1,21 @@
-// GlanceMail — Gmail inbox triage in 30 seconds + voice reply + next-meeting
-// brief, for Even Realities G2. Track 4: AI Assistants & Work.
+// GlanceMail — Gmail inbox triage in 30 seconds + voice reply, for Even
+// Realities G2. Track 4: AI Assistants & Work.
 //
 // Built on the official `asr` template: the mic -> STT pipeline, the
 // event-routing pattern (see eventTypeOf — CLICK_EVENT is 0 and protobuf
 // omits zero-value fields, so a tap arrives with eventType undefined),
 // double-tap-to-exit, and the debounced textContainerUpgrade render are
-// all kept as-is. What changed: one text container now renders three
-// screens (inbox / reply / meeting) from src/screens.ts, and STT final
-// text is also parsed as voice commands ("approve", "edit", "discard").
+// all kept as-is. What changed: one text container now renders the inbox
+// and reply screens from src/screens.ts, and STT final text is also parsed
+// as voice commands ("approve", "edit", "discard").
 //
-// MOCK DATA: inbox, draft reply and meeting come from src/data/mock.ts.
-// No real Gmail/Calendar calls, no API keys, no secrets in this repo.
-// TODO (MVP): Gmail OAuth via pairing code + Whisper STT backend + real
-// send-reply wiring — all through our own server, whitelisted in app.json.
+// LIVE BACKEND: inbox, AI draft and send go through our own server
+// (src/data/backend.ts, default http://localhost:8787). If the backend is
+// unreachable the app falls back to src/data/mock.ts and says so
+// ("OFFLINE — mock data") in the companion footer and on the glasses.
+// No API keys, no secrets in this repo.
+// Meeting brief: CUT in the MVP (see screens.ts) — the backend never
+// returns kind "meeting" and meeting emails are filtered from the inbox.
 
 import {
   waitForEvenAppBridge,
@@ -22,23 +25,72 @@ import {
   OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
 import { startSttStream } from './asr/stt'
-import { mountUi, setStatus, setTranscript, setGlassesText } from './ui'
+import {
+  mountUi,
+  setStatus,
+  setTranscript,
+  setGlassesText,
+  setBackendStatus,
+} from './ui'
 import {
   initialState,
   renderGlassesText,
+  fallbackEmails,
   type GlanceState,
   type ReplyAction,
 } from './screens'
-import { MOCK_EMAILS } from './data/mock'
+import { MOCK_DRAFT_REPLY } from './data/mock'
+import { getInbox, getDraft, sendReply } from './data/backend'
 
 const state: GlanceState = initialState()
 
+// --- backend: live inbox load (mock fallback when unreachable) ---
+
+async function loadInbox() {
+  state.inboxLoading = true
+  state.offline = false
+  setBackendStatus('connecting')
+  render()
+  try {
+    const { emails } = await getInbox(3)
+    // Meeting brief is CUT in the MVP: drop any meeting-kind email so the
+    // meeting screen stays unreachable even if the backend ever sends one.
+    state.emails = emails.filter(e => e.kind !== 'meeting')
+    if (state.selectedEmail >= state.emails.length) state.selectedEmail = 0
+    state.offline = false
+    state.notice = ''
+    setBackendStatus('live')
+  } catch (err) {
+    console.warn('Backend unreachable — showing mock data:', err)
+    state.emails = fallbackEmails()
+    state.offline = true
+    state.notice = 'OFFLINE - mock data'
+    setBackendStatus('offline')
+  } finally {
+    state.inboxLoading = false
+    render()
+  }
+}
+
 // --- state transitions (shared by glasses events, voice, companion UI) ---
 
-function approveReply() {
-  if (state.screen !== 'reply' || state.replyStatus !== 'draft') return
-  state.replyStatus = 'approved'
-  state.notice = 'Sent (mock — no real send yet)'
+async function approveReply() {
+  if (state.screen !== 'reply') return
+  if (state.replyStatus !== 'draft') return
+  const email = state.emails[state.selectedEmail]
+  if (!email) return
+  state.replyStatus = 'sending'
+  state.notice = ''
+  render()
+  try {
+    await sendReply(email.id, state.draft)
+    state.replyStatus = 'approved'
+    state.notice = 'Sent.'
+  } catch (err) {
+    console.warn('Send failed:', err)
+    state.replyStatus = 'draft'
+    state.notice = `Send failed: ${(err as Error)?.message ?? 'backend error'}`
+  }
   render()
 }
 
@@ -60,8 +112,8 @@ function cancelEdit() {
   render()
 }
 
-function openSelectedEmail() {
-  const email = MOCK_EMAILS[state.selectedEmail]
+async function openSelectedEmail() {
+  const email = state.emails[state.selectedEmail]
   if (!email) return
   if (email.kind === 'newsletter') {
     state.notice = 'Archived — no action needed'
@@ -69,21 +121,42 @@ function openSelectedEmail() {
     return
   }
   if (email.kind === 'meeting') {
-    state.screen = 'meeting'
-    state.notice = ''
+    // CUT in MVP — unreachable (filtered from the inbox); defensive only.
+    state.notice = 'Meeting brief cut in MVP'
     render()
     return
   }
   state.screen = 'reply'
-  state.replyStatus = 'draft'
+  state.replyStatus = 'drafting'
+  state.replyAction = 'approve'
   state.notice = ''
+  render()
+  if (state.offline) {
+    // No backend: keep the mock draft and say so.
+    state.draft = MOCK_DRAFT_REPLY
+    state.replyStatus = 'draft'
+    state.notice = 'OFFLINE - mock draft'
+    render()
+    return
+  }
+  try {
+    const { draft } = await getDraft(email.id)
+    state.draft = draft
+    state.replyStatus = 'draft'
+    state.notice = ''
+  } catch (err) {
+    console.warn('Draft fetch failed — keeping mock draft:', err)
+    state.draft = MOCK_DRAFT_REPLY
+    state.replyStatus = 'draft'
+    state.notice = 'Draft failed - mock draft'
+  }
   render()
 }
 
 function cycleSelection(dir: 1 | -1) {
   if (state.screen === 'inbox') {
     state.selectedEmail =
-      (state.selectedEmail + dir + MOCK_EMAILS.length) % MOCK_EMAILS.length
+      (state.selectedEmail + dir + state.emails.length) % state.emails.length
     state.notice = ''
   } else if (state.screen === 'reply' && state.replyStatus === 'draft') {
     const order: ReplyAction[] = ['approve', 'edit', 'discard']
@@ -109,6 +182,7 @@ function primaryAction() {
     return render()
   }
   if (state.replyStatus === 'editing') return cancelEdit()
+  if (state.replyStatus === 'drafting' || state.replyStatus === 'sending') return
   if (state.replyAction === 'approve') return approveReply()
   if (state.replyAction === 'edit') return startEdit()
   return discardReply()
@@ -137,11 +211,8 @@ function handleVoiceCommand(raw: string) {
   if (text.includes('edit')) {
     if (state.screen === 'reply') return startEdit()
   }
-  if (text.includes('meeting') || text.includes('brief')) {
-    state.screen = 'meeting'
-    return render()
-  }
   if (text.includes('reply')) {
+    if (state.screen === 'inbox') return openSelectedEmail()
     state.screen = 'reply'
     return render()
   }
@@ -161,12 +232,14 @@ mountUi({
   onEdit: startEdit,
   onDiscard: discardReply,
   onOpenReply: () => {
+    if (state.screen === 'inbox') return openSelectedEmail()
     state.screen = 'reply'
     state.replyStatus = 'draft'
     render()
   },
   onGoMeeting: () => {
-    state.screen = 'meeting'
+    // Meeting brief CUT in the MVP — button hidden in the companion UI.
+    state.notice = 'Meeting brief cut in MVP'
     render()
   },
   onGoInbox: () => {
@@ -221,6 +294,9 @@ function render() {
 }
 
 render()
+
+// Load the real inbox now (falls back to mock data if the backend is down).
+void loadInbox()
 
 // --- mic -> STT (template stub: throws until a provider is wired in) ---
 
